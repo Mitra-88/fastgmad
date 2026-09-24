@@ -13,3 +13,12 @@ debug = false
 debug-assertions = false
 overflow-checks = false
 rpath = false
+
+[profile.dev]
+opt-level = 0
+debug = 0
+strip = "debuginfo"
+incremental = true
+codegen-units = 256
+lto = false
+panic = "unwind"

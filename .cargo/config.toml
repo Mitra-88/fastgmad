@@ -1,8 +1,10 @@
-[build]
-rustc-wrapper = "sccache"
-
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "target-cpu=x86-64-v3", "-C", "linker=lld"]
+linker = "lld-link"
+rustflags = ["-C", "target-cpu=x86-64-v3"]
 
 [target.x86_64-unknown-linux-gnu]
+linker = "clang"
 rustflags = ["-C", "target-cpu=x86-64-v3", "-C", "link-arg=-fuse-ld=mold"]
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "target-cpu=apple-m1"]

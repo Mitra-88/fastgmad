@@ -1,25 +1,21 @@
 [package]
 name = "fastgmad-bin"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 authors = ["William Venner, Mitra-88"]
 license = "MIT OR Apache-2.0"
 description = "Fast gmad implementation"
 repository = "https://github.com/Mitra-88/fastgmad"
 publish = false
-resolver = "3"
-
-[features]
-default = ["binary"]
-binary = []
 
 [[bin]]
 name = "fastgmad"
 path = "src/main.rs"
+doc = false
 
 [dependencies]
 fastgmad = { path = "../fastgmad-lib", features = ["binary"] }
-log = "0.4.33"
+log = "0.4.34"
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "0.1.31"

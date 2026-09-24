@@ -1,55 +1,279 @@
-name: Build FastGmad
+name: FastGMAD nightly
 
 on:
   push:
     branches: [updated-fastgmad]
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        include:
-          - os: windows-latest
-            artifact_suffix: Windows-x86-64-v3
-            exe_ext: ".exe"
-
-          - os: ubuntu-latest
-            artifact_suffix: Linux-x86-64-v3
-            exe_ext: ""
-
-          - os: macos-latest
-            artifact_suffix: macOS-ARM64-AppleSilicon
-            exe_ext: ""
-
-    runs-on: ${{ matrix.os }}
-
+  windows-x64:
+    name: Windows x64 (MSVC + lld-link, x86-64-v3)
+    runs-on: windows-2025
+    timeout-minutes: 30
+    if: github.repository == 'Mitra-88/fastgmad'
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16
 
-      - name: Install mold linker
-        if: matrix.os == 'ubuntu-latest'
-        uses: rui314/setup-mold@v1
+      - name: Verify tools
+        shell: pwsh
+        run: |
+          foreach ($tool in 'cargo', 'rustc', 'lld-link') {
+            if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
+              Write-Output "::error::missing tool on windows-2025: $tool"
+              exit 1
+            }
+          }
+          cargo --version
+          rustc --version
+          lld-link --version
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-
-      - name: Get short commit SHA
-        id: sha
-        shell: bash
-        run: echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-
-      - name: Build binary
-        run: cargo build --release --package fastgmad-bin --bin fastgmad
+      - name: Build fastgmad.exe
+        shell: pwsh
         env:
           CARGO_TERM_COLOR: always
-          RUSTC_WRAPPER: ""
+        run: cargo build --release --package fastgmad-bin --bin fastgmad
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+      - name: Tests
+        shell: pwsh
+        env:
+          CARGO_TERM_COLOR: always
+        run: cargo test --release --package fastgmad
+
+      - name: Smoke test
+        shell: cmd
+        run: target\release\fastgmad.exe 2>&1 | findstr /C:"FastGMAD"
+
+      - name: Stage artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/release/fastgmad.exe dist/
+          Copy-Item LICENSE-MIT, LICENSE-APACHE dist/
+
+      - name: Upload (transport to release job)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: FastGmad-${{ matrix.artifact_suffix }}
-          path: |
-            ./target/release/fastgmad${{ matrix.exe_ext }}
+          name: fastgmad-windows-x64-v3
+          path: dist/
+          retention-days: 1
+          if-no-files-found: error
+
+  linux-x64:
+    name: Linux x64 (clang + mold, x86-64-v3)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    if: github.repository == 'Mitra-88/fastgmad'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+
+      - name: Install mold linker
+        uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16
+
+      - name: Verify tools
+        run: |
+          for tool in cargo rustc clang mold file; do
+            command -v "$tool" >/dev/null || { echo "::error::missing tool on ubuntu-26.04: $tool"; exit 1; }
+          done
+          cargo --version
+          clang --version | head -1
+          mold --version
+
+      - name: Build fastgmad
+        env:
+          CARGO_TERM_COLOR: always
+        run: cargo build --release --package fastgmad-bin --bin fastgmad
+
+      - name: Tests
+        env:
+          CARGO_TERM_COLOR: always
+        run: cargo test --release --package fastgmad
+
+      - name: Smoke test
+        run: |
+          file target/release/fastgmad
+          ./target/release/fastgmad 2>&1 | grep -m1 "FastGMAD"
+
+      - name: Stage artifact
+        run: |
+          mkdir -p dist
+          cp target/release/fastgmad LICENSE-MIT LICENSE-APACHE dist/
+
+      - name: Upload (transport to release job)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fastgmad-linux-x64-v3
+          path: dist/
+          retention-days: 1
+          if-no-files-found: error
+
+  macos-arm64:
+    name: macOS arm64 (Apple Silicon, apple-m1)
+    runs-on: macos-26
+    timeout-minutes: 30
+    if: github.repository == 'Mitra-88/fastgmad'
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16
+
+      - name: Verify tools
+        run: |
+          for tool in cargo rustc clang file; do
+            command -v "$tool" >/dev/null || { echo "::error::missing tool on macos-26: $tool"; exit 1; }
+          done
+          cargo --version
+          rustc --version
+          clang --version | head -1
+
+      - name: Build fastgmad
+        env:
+          CARGO_TERM_COLOR: always
+        run: cargo build --release --package fastgmad-bin --bin fastgmad
+
+      - name: Tests
+        env:
+          CARGO_TERM_COLOR: always
+        run: cargo test --release --package fastgmad
+
+      - name: Smoke test
+        run: |
+          file target/release/fastgmad
+          ./target/release/fastgmad 2>&1 | grep -m1 "FastGMAD"
+
+      - name: Stage artifact
+        run: |
+          mkdir -p dist
+          cp target/release/fastgmad LICENSE-MIT LICENSE-APACHE dist/
+
+      - name: Upload (transport to release job)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fastgmad-macos-arm64
+          path: dist/
+          retention-days: 1
+          if-no-files-found: error
+
+  release:
+    name: Publish nightly release
+    needs: [windows-x64, linux-x64, macos-arm64]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    if: github.repository == 'Mitra-88/fastgmad'
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        with:
+          fetch-depth: 0
+
+      - name: Download built binaries
+        uses: actions/download-artifact@484a0b528fb4d7bd804637ccb632e47a0e638317
+        with:
+          path: pkgs
+
+      - name: Verify tools
+        run: |
+          for tool in git zip tar sha256sum sha512sum gh; do
+            command -v "$tool" >/dev/null || { echo "::error::missing tool on ubuntu-26.04: $tool"; exit 1; }
+          done
+          gh --version | head -1
+
+      - name: Package and hash
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          DATE_STAMP="$(date -u '+%Y-%m-%d')"
+          BUILD_DATE="$(date -u '+%Y-%m-%d %H:%M UTC')"
+          VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' fastgmad-lib/Cargo.toml | head -1)"
+
+          mkdir -p release-out
+          (cd pkgs/fastgmad-windows-x64-v3 && zip -9 -q "../../release-out/FastGmad-Windows-x86-64-v3-${SHORT_SHA}-${DATE_STAMP}.zip" fastgmad.exe LICENSE-MIT LICENSE-APACHE)
+          tar -czf "release-out/FastGmad-Linux-x86-64-v3-${SHORT_SHA}-${DATE_STAMP}.tar.gz" -C pkgs/fastgmad-linux-x64-v3 fastgmad LICENSE-MIT LICENSE-APACHE
+          tar -czf "release-out/FastGmad-macOS-ARM64-AppleSilicon-${SHORT_SHA}-${DATE_STAMP}.tar.gz" -C pkgs/fastgmad-macos-arm64 fastgmad LICENSE-MIT LICENSE-APACHE
+
+          {
+            echo "SHORT_SHA=${SHORT_SHA}"
+            echo "DATE_STAMP=${DATE_STAMP}"
+            echo "BUILD_DATE=${BUILD_DATE}"
+            echo "VERSION=${VERSION}"
+          } >> "$GITHUB_ENV"
+
+          ls -la release-out/
+
+      - name: Build release notes
+        run: |
+          PREV="$(git rev-parse -q --verify refs/tags/nightly || true)"
+          if [ -n "$PREV" ]; then
+            CHANGES="$(git log --pretty=format:'* %s (%h)' "${PREV}..${GITHUB_SHA}" | head -20)"
+          else
+            CHANGES="$(git log -10 --pretty=format:'* %s (%h)')"
+          fi
+          if [ -z "$CHANGES" ]; then
+            CHANGES="* No new commits since the previous nightly; rebuilt with current toolchains."
+          fi
+
+          cat > body.md <<EOF
+          **Rolling Release**
+          * **Version:** \`${VERSION}\`
+          * **Build Number:** [#${GITHUB_RUN_NUMBER}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})
+          * **Branch:** [\`${GITHUB_REF_NAME}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/tree/${GITHUB_REF_NAME})
+          * **Commit:** [\`${SHORT_SHA}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA})
+          * **Built on:** ${BUILD_DATE}
+
+          ## 📝 Recent Changes
+          ${CHANGES}
+
+          ## 🔐 File Hashes
+          EOF
+
+          for f in release-out/*; do
+            {
+              echo "* \`$(basename "$f")\`"
+              echo "  - SHA-256: \`$(sha256sum "$f" | cut -d' ' -f1)\`"
+              echo "  - SHA-512: \`$(sha512sum "$f" | cut -d' ' -f1)\`"
+            } >> body.md
+          done
+
+      - name: Delete previous nightly release
+        run: gh release delete nightly --cleanup-tag --yes || true
+
+      - name: Create nightly release
+        run: |
+          gh release create nightly \
+            --title "Nightly Release (build #${GITHUB_RUN_NUMBER})" \
+            --notes-file body.md \
+            --target "${GITHUB_SHA}" \
+            release-out/*
+
+      - name: Remove transport artifacts
+        run: |
+          IDS="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" \
+                  --paginate \
+                  --jq ".artifacts[] | select(.workflow_run.id == ${GITHUB_RUN_ID}) | .id")"
+          for id in $IDS; do
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/$id" \
+              || echo "WARN: could not delete artifact $id (expires on its own in 1 day)"
+          done
