@@ -16,11 +16,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    if: github.repository == 'Mitra-88/fastgmad'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        with:
+          fetch-depth: 0
+
+      - name: Check for changes since the last nightly
+        id: check
+        run: |
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          PREV="$(git rev-parse -q --verify 'refs/tags/nightly^{commit}' || true)"
+          if [ -z "$PREV" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          elif [ "$PREV" = "${GITHUB_SHA}" ] || [ -z "$(git log --oneline "${PREV}..${GITHUB_SHA}")" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
   windows-x64:
     name: Windows x64 (MSVC + lld-link, x86-64-v3)
     runs-on: windows-2025
     timeout-minutes: 30
-    if: github.repository == 'Mitra-88/fastgmad'
+    needs: changes
+    if: github.repository == 'Mitra-88/fastgmad' && (github.event_name != 'schedule' || needs.changes.outputs.changed == 'true')
     steps:
       - name: Checkout
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
@@ -76,7 +106,8 @@ jobs:
     name: Linux x64 (clang + mold, x86-64-v3)
     runs-on: ubuntu-26.04
     timeout-minutes: 30
-    if: github.repository == 'Mitra-88/fastgmad'
+    needs: changes
+    if: github.repository == 'Mitra-88/fastgmad' && (github.event_name != 'schedule' || needs.changes.outputs.changed == 'true')
     steps:
       - name: Checkout
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
@@ -128,7 +159,8 @@ jobs:
     name: macOS arm64 (Apple Silicon, apple-m1)
     runs-on: macos-26
     timeout-minutes: 30
-    if: github.repository == 'Mitra-88/fastgmad'
+    needs: changes
+    if: github.repository == 'Mitra-88/fastgmad' && (github.event_name != 'schedule' || needs.changes.outputs.changed == 'true')
     env:
       MACOSX_DEPLOYMENT_TARGET: '11.0'
     steps:
@@ -177,10 +209,10 @@ jobs:
 
   release:
     name: Publish nightly release
-    needs: [windows-x64, linux-x64, macos-arm64]
+    needs: [changes, windows-x64, linux-x64, macos-arm64]
     runs-on: ubuntu-26.04
     timeout-minutes: 15
-    if: github.repository == 'Mitra-88/fastgmad'
+    if: github.repository == 'Mitra-88/fastgmad' && (github.event_name != 'schedule' || needs.changes.outputs.changed == 'true')
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
