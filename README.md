@@ -20,7 +20,6 @@ fastgmad extract -file path/to/gma.gma -out path/to/folder
 fastgmad extract -file path/to/gma.gma
 fastgmad extract -stdin -out path/to/folder
 fastgmad path/to/gma.gma
-
 ```
 <!--ENDUSAGE><!-->
 

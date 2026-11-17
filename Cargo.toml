@@ -7,18 +7,19 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 panic = "abort"
-strip = true
-incremental = false
 debug = false
+strip = "symbols"
 debug-assertions = false
 overflow-checks = false
-rpath = false
+incremental = false
 
 [profile.dev]
 opt-level = 0
-debug = 0
-strip = "debuginfo"
+debug = false
+strip = "none"
+debug-assertions = false
+overflow-checks = false
+lto = "off"
+panic = "abort"
 incremental = true
 codegen-units = 256
-lto = false
-panic = "unwind"
