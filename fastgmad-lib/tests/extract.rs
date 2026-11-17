@@ -10,6 +10,11 @@ fn push_nul(buf: &mut Vec<u8>, s: &str) {
 }
 
 fn build_gma_from(entries: &[(&str, &[u8])]) -> Vec<u8> {
+	let with_crc: Vec<(&str, &[u8], u32)> = entries.iter().map(|(name, data)| (*name, *data, 0)).collect();
+	build_gma_with_crc(&with_crc)
+}
+
+fn build_gma_with_crc(entries: &[(&str, &[u8], u32)]) -> Vec<u8> {
 	let mut b = Vec::new();
 	b.extend_from_slice(b"GMAD");
 	b.push(3);
@@ -21,17 +26,27 @@ fn build_gma_from(entries: &[(&str, &[u8])]) -> Vec<u8> {
 	push_nul(&mut b, "author");
 	b.extend_from_slice(&0u32.to_le_bytes());
 
-	for (i, (name, data)) in entries.iter().enumerate() {
+	for (i, (name, data, crc)) in entries.iter().enumerate() {
 		b.extend_from_slice(&(i as u32 + 1).to_le_bytes());
 		push_nul(&mut b, name);
 		b.extend_from_slice(&(data.len() as u64).to_le_bytes());
-		b.extend_from_slice(&0u32.to_le_bytes());
+		b.extend_from_slice(&crc.to_le_bytes());
 	}
 	b.extend_from_slice(&0u32.to_le_bytes());
-	for (_, data) in entries {
+	for (_, data, _) in entries {
 		b.extend_from_slice(data);
 	}
 	b
+}
+
+fn write_gma(tag: &str, bytes: &[u8]) -> PathBuf {
+	let path = temp_out(tag).with_extension("gma");
+	std::fs::write(&path, bytes).unwrap();
+	path
+}
+
+fn crc_mismatch_gma(entry: &str) -> Vec<u8> {
+	build_gma_with_crc(&[(entry, b"hello", crc32fast::hash(b"hello") ^ 1)])
 }
 
 fn build_gma() -> Vec<u8> {
@@ -117,6 +132,69 @@ fn unwritable_entry_keeps_stream_aligned() {
 	assert!(format!("{err}").contains("failed to write"), "unexpected error: {err}");
 	assert_eq!(std::fs::read(out.join("after/ok.txt")).unwrap(), b"good");
 	let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn counts_correct_crcs_and_skips_unrecorded() {
+	let good = crc32fast::hash(b"hello");
+	let gma = build_gma_with_crc(&[("a/good.txt", b"hello", good), ("b/unrecorded.txt", b"hello", 0)]);
+	let gma_path = write_gma("crc-ok", &gma);
+	let out = temp_out("crc-ok-out");
+
+	let summary = extract_gma_file(&test_conf(&out, 4), &gma_path).unwrap();
+
+	assert_eq!((summary.entries, summary.crc_checked, summary.crc_mismatch), (2, 1, 0));
+	let _ = std::fs::remove_dir_all(&out);
+	let _ = std::fs::remove_file(&gma_path);
+}
+
+#[test]
+fn crc_mismatch_is_counted_and_the_file_is_written() {
+	let gma = crc_mismatch_gma("a/bad.txt");
+	let gma_path = write_gma("crc-bad", &gma);
+	let out = temp_out("crc-bad-out");
+
+	let summary = extract_gma_file(&test_conf(&out, 4), &gma_path).unwrap();
+
+	assert_eq!((summary.crc_checked, summary.crc_mismatch), (1, 1));
+	assert_eq!(std::fs::read(out.join("a/bad.txt")).unwrap(), b"hello");
+	let _ = std::fs::remove_dir_all(&out);
+	let _ = std::fs::remove_file(&gma_path);
+}
+
+#[test]
+fn strict_crc_mismatch_fails_after_writing_the_files() {
+	let good = crc32fast::hash(b"hello");
+	let gma = build_gma_with_crc(&[("a/bad.txt", b"hello", good ^ 1), ("b/ok.txt", b"hello", good)]);
+	let gma_path = write_gma("crc-strict", &gma);
+	let out = temp_out("crc-strict-out");
+	let conf = ExtractGmaConfig {
+		strict: true,
+		..test_conf(&out, 4)
+	};
+
+	let err = extract_gma_file(&conf, &gma_path).unwrap_err();
+
+	assert!(format!("{err}").contains("a/bad.txt"), "unexpected error: {err}");
+	assert_eq!(std::fs::read(out.join("a/bad.txt")).unwrap(), b"hello");
+	assert_eq!(std::fs::read(out.join("b/ok.txt")).unwrap(), b"hello");
+	let _ = std::fs::remove_dir_all(&out);
+	let _ = std::fs::remove_file(&gma_path);
+}
+
+#[test]
+fn stream_engine_checks_crcs_too() {
+	let good = crc32fast::hash(b"hello");
+	for threads in [1, 2] {
+		let gma = build_gma_with_crc(&[("a/ok.txt", b"hello", good), ("b/bad.txt", b"hello", good ^ 1)]);
+		let out = temp_out(&format!("crc-stream-{threads}"));
+
+		let summary = extract_gma(&test_conf(&out, threads), &mut Cursor::new(gma)).unwrap();
+
+		assert_eq!((summary.crc_checked, summary.crc_mismatch), (2, 1), "threads {threads}");
+		assert_eq!(std::fs::read(out.join("b/bad.txt")).unwrap(), b"hello");
+		let _ = std::fs::remove_dir_all(&out);
+	}
 }
 
 #[test]

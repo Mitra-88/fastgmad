@@ -1,6 +1,6 @@
 [package]
 name = "fastgmad-bin"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 authors = ["William Venner, Mitra-88"]
 license = "MIT OR Apache-2.0"

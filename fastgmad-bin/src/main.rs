@@ -1,7 +1,7 @@
 use fastgmad::error::FastGmadError;
-use fastgmad::extract::{ExtractGmaConfig, ExtractGmadIn};
+use fastgmad::extract::{ExtractGmaConfig, ExtractGmadIn, ExtractSummary};
 use std::{
-	io::{BufReader, Write},
+	io::{BufReader, IsTerminal, Write},
 	path::Path,
 	time::Instant,
 };
@@ -10,8 +10,11 @@ fn main() {
 	init_logger();
 
 	match bin() {
-		Ok(()) => {
+		Ok(summary) => {
 			log::info!("Finished");
+			let mut stdout = std::io::stdout();
+			let piped = !stdout.is_terminal();
+			print_summary(&summary, &mut stdout, piped);
 			std::process::exit(0);
 		}
 		Err(FastGmadBinError::FastGmadError(err)) => {
@@ -21,6 +24,7 @@ fn main() {
 		}
 		Err(FastGmadBinError::PrintHelp(None)) => {
 			eprintln!("{}", include_str!("usage.txt"));
+			std::process::exit(2);
 		}
 		Err(FastGmadBinError::PrintHelp(Some(msg))) => {
 			log::error!("{msg}\n");
@@ -28,6 +32,14 @@ fn main() {
 			std::process::exit(2);
 		}
 	}
+}
+
+fn print_summary(summary: &ExtractSummary, out: &mut impl Write, piped: bool) {
+	if !piped {
+		return;
+	}
+	let _ = writeln!(out, "{}", summary.to_json());
+	let _ = out.flush();
 }
 
 fn init_logger() {
@@ -52,7 +64,7 @@ fn init_logger() {
 	log::set_max_level(log::LevelFilter::Info);
 }
 
-fn bin() -> Result<(), FastGmadBinError> {
+fn bin() -> Result<ExtractSummary, FastGmadBinError> {
 	let mut args = std::env::args_os().skip(1);
 	let cmd = args.next().ok_or(FastGmadBinError::PrintHelp(None))?;
 	let path = Path::new(&cmd);
@@ -71,17 +83,15 @@ fn bin() -> Result<(), FastGmadBinError> {
 	}
 }
 
-fn extract(conf: ExtractGmaConfig, input: ExtractGmadIn) -> Result<(), FastGmadBinError> {
-	match input {
-		ExtractGmadIn::File(path) => {
-			fastgmad::extract::extract_gma_file(&conf, &path)?;
-		}
+fn extract(conf: ExtractGmaConfig, input: ExtractGmadIn) -> Result<ExtractSummary, FastGmadBinError> {
+	let summary = match input {
+		ExtractGmadIn::File(path) => fastgmad::extract::extract_gma_file(&conf, &path)?,
 		ExtractGmadIn::Stdin => {
 			let mut r = BufReader::with_capacity(1 << 20, std::io::stdin().lock());
-			fastgmad::extract::extract_gma(&conf, &mut r)?;
+			fastgmad::extract::extract_gma(&conf, &mut r)?
 		}
-	}
-	Ok(())
+	};
+	Ok(summary)
 }
 
 enum FastGmadBinError {
@@ -92,5 +102,34 @@ enum FastGmadBinError {
 impl From<FastGmadError> for FastGmadBinError {
 	fn from(e: FastGmadError) -> Self {
 		Self::FastGmadError(e)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn summary() -> ExtractSummary {
+		ExtractSummary {
+			v: 1,
+			entries: 2,
+			bad_names: 0,
+			crc_checked: 1,
+			crc_mismatch: 0,
+		}
+	}
+
+	#[test]
+	fn status_line_is_printed_only_when_piped() {
+		let mut piped = Vec::new();
+		print_summary(&summary(), &mut piped, true);
+		assert_eq!(
+			String::from_utf8(piped).unwrap(),
+			"{\"v\":1,\"entries\":2,\"bad_names\":0,\"crc_checked\":1,\"crc_mismatch\":0}\n"
+		);
+
+		let mut terminal = Vec::new();
+		print_summary(&summary(), &mut terminal, false);
+		assert!(terminal.is_empty());
 	}
 }

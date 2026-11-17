@@ -17,8 +17,7 @@ fn main() {
 	let readme = format!("{}\n```\n{usage}\n```\n{}", &readme[..usage_start], &readme[usage_end..]);
 	std::fs::write("../README.md", readme).expect("failed to write README.md");
 
-	#[cfg(target_os = "windows")]
-	{
+	if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
 		let icon_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
 			.join("..")
 			.join("assets")

@@ -3,6 +3,21 @@
 version = 4
 
 [[package]]
+name = "cfg-if"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
+
+[[package]]
+name = "crc32fast"
+version = "1.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b929dd2a135771f40afabd1073f85eed59c800b7c61901e5c254270497dad64"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10,8 +25,9 @@ checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
 name = "fastgmad"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
+ "crc32fast",
  "log",
  "memchr",
  "serde",
@@ -21,7 +37,7 @@ dependencies = [
 
 [[package]]
 name = "fastgmad-bin"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "fastgmad",
  "log",

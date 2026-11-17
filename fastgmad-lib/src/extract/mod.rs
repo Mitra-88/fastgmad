@@ -21,6 +21,29 @@ pub use conf::ExtractGmaConfig;
 pub use conf::{ExtractGmadIn, PrintHelp};
 
 const COPY_CHUNK: u64 = 1 << 20;
+const SUMMARY_VERSION: u8 = 1;
+
+#[derive(Debug, serde::Serialize)]
+pub struct ExtractSummary {
+	pub v: u8,
+	pub entries: usize,
+	pub bad_names: u64,
+	pub crc_checked: usize,
+	pub crc_mismatch: usize,
+}
+
+impl ExtractSummary {
+	pub fn to_json(&self) -> String {
+		serde_json::to_string(self).expect("ExtractSummary is always serializable")
+	}
+}
+
+#[derive(Default)]
+struct CrcTally {
+	checked: AtomicUsize,
+	mismatched: AtomicUsize,
+	first_mismatch: Mutex<Option<PathBuf>>,
+}
 
 fn gma_err(message: impl Into<String>) -> FastGmadError {
 	FastGmadError {
@@ -150,7 +173,7 @@ struct StubAddonJson<'a> {
 	description: Cow<'a, str>,
 }
 
-fn read_index(conf: &ExtractGmaConfig, r: &mut impl BufRead) -> Result<Vec<GmaEntry>, FastGmadError> {
+fn read_index(conf: &ExtractGmaConfig, r: &mut impl BufRead) -> Result<(Vec<GmaEntry>, u64), FastGmadError> {
 	log::debug!("Reading file list...");
 
 	let mut entries = Vec::new();
@@ -166,7 +189,7 @@ fn read_index(conf: &ExtractGmaConfig, r: &mut impl BufRead) -> Result<Vec<GmaEn
 		}
 		let name = map_io(r.read_nul_str(&mut buf), "reading file index")?.to_vec();
 		let size = map_io(read_u64_le(r), "reading file index")?;
-		map_io(r.skip(4), "reading file index")?;
+		let crc = map_io(read_u32_le(r), "reading file index")?;
 
 		let entry_offset = offset;
 		offset = offset.checked_add(size).ok_or_else(|| gma_err("file index is too large"))?;
@@ -175,10 +198,11 @@ fn read_index(conf: &ExtractGmaConfig, r: &mut impl BufRead) -> Result<Vec<GmaEn
 			path: entry_path(&conf.out, &name, &mut bad_names, &mut seen),
 			offset: entry_offset,
 			size,
+			crc,
 		});
 	}
 
-	Ok(entries)
+	Ok((entries, bad_names))
 }
 
 fn entry_path(out: &Path, raw: &[u8], bad_names: &mut u64, seen: &mut HashSet<String>) -> PathBuf {
@@ -258,37 +282,39 @@ struct GmaEntry {
 	path: PathBuf,
 	offset: u64,
 	size: u64,
+	crc: u32,
 }
 
-pub fn extract_gma(conf: &ExtractGmaConfig, r: &mut impl BufRead) -> Result<(), FastGmadError> {
+pub fn extract_gma(conf: &ExtractGmaConfig, r: &mut impl BufRead) -> Result<ExtractSummary, FastGmadError> {
 	let (title, addon_json) = read_header(r)?;
 	std::fs::create_dir_all(&conf.out).map_err(|e| FastGmadError::io(e, "creating output directory", Some(&conf.out)))?;
 	write_addon_json(conf, &title, &addon_json)?;
-	let entries = read_index(conf, r)?;
+	let (entries, bad_names) = read_index(conf, r)?;
 	create_output_dirs(&entries)?;
 
+	let tally = CrcTally::default();
 	if conf.max_io_threads.get() == 1 {
-		write_entries_sequential(r, &entries)?;
+		write_entries_sequential(r, &entries, &tally)?;
 	} else {
-		write_entries_parallel(conf, r, &entries)?;
+		write_entries_parallel(conf, r, &entries, &tally)?;
 	}
 
 	log::info!("Extracted {} entries ({})", entries.len(), human_bytes(total_size(&entries)));
-	Ok(())
+	summary(conf, entries.len(), bad_names, &tally)
 }
 
 fn total_size(entries: &[GmaEntry]) -> u64 {
 	entries.iter().map(|e| e.size).sum()
 }
 
-pub fn extract_gma_file(conf: &ExtractGmaConfig, path: &Path) -> Result<(), FastGmadError> {
+pub fn extract_gma_file(conf: &ExtractGmaConfig, path: &Path) -> Result<ExtractSummary, FastGmadError> {
 	let file = File::open(path).map_err(|e| FastGmadError::io(e, "opening GMA file", Some(path)))?;
 	let mut r = BufReader::with_capacity(1 << 20, file);
 
 	let (title, addon_json) = read_header(&mut r)?;
 	std::fs::create_dir_all(&conf.out).map_err(|e| FastGmadError::io(e, "creating output directory", Some(&conf.out)))?;
 	write_addon_json(conf, &title, &addon_json)?;
-	let mut entries = read_index(conf, &mut r)?;
+	let (mut entries, bad_names) = read_index(conf, &mut r)?;
 	let data_start = r
 		.stream_position()
 		.map_err(|e| FastGmadError::io(e, "locating GMA data block", Some(path)))?;
@@ -301,17 +327,18 @@ pub fn extract_gma_file(conf: &ExtractGmaConfig, path: &Path) -> Result<(), Fast
 			.ok_or_else(|| gma_err("GMA file index is too large"))?;
 	}
 	create_output_dirs(&entries)?;
-	extract_entries_parallel(conf, path, &entries)?;
+	let tally = CrcTally::default();
+	extract_entries_parallel(conf, path, &entries, &tally)?;
 
 	log::info!("Extracted {} entries ({})", entries.len(), human_bytes(total_size(&entries)));
-	Ok(())
+	summary(conf, entries.len(), bad_names, &tally)
 }
 
-fn write_entries_sequential(r: &mut impl BufRead, entries: &[GmaEntry]) -> Result<(), FastGmadError> {
+fn write_entries_sequential(r: &mut impl BufRead, entries: &[GmaEntry], tally: &CrcTally) -> Result<(), FastGmadError> {
 	let mut failed_writes = 0usize;
 	let mut scratch = Vec::new();
 	for entry in entries {
-		write_entry_streaming(r, &entry.path, entry.size, &mut scratch, &mut failed_writes)?;
+		write_entry_streaming(r, &entry.path, entry.crc, entry.size, &mut scratch, &mut failed_writes, tally)?;
 	}
 	finish_failed_writes(failed_writes)
 }
@@ -319,9 +346,11 @@ fn write_entries_sequential(r: &mut impl BufRead, entries: &[GmaEntry]) -> Resul
 fn write_entry_streaming(
 	r: &mut impl BufRead,
 	path: &Path,
+	crc: u32,
 	size: u64,
 	scratch: &mut Vec<u8>,
 	failed_writes: &mut usize,
+	tally: &CrcTally,
 ) -> Result<(), FastGmadError> {
 	let mut file = match File::create(path) {
 		Ok(f) => BufWriter::with_capacity(size.min(COPY_CHUNK) as usize, f),
@@ -333,6 +362,7 @@ fn write_entry_streaming(
 		}
 	};
 
+	let mut hasher = crc32fast::Hasher::new();
 	let mut remaining = size;
 	while remaining > 0 {
 		let chunk = remaining.min(COPY_CHUNK) as usize;
@@ -340,6 +370,7 @@ fn write_entry_streaming(
 			scratch.resize(chunk, 0);
 		}
 		r.read_exact(&mut scratch[..chunk]).map_err(|e| entry_truncated(e, path))?;
+		hasher.update(&scratch[..chunk]);
 		remaining -= chunk as u64;
 		if let Err(e) = file.write_all(&scratch[..chunk]) {
 			log::warn!("Failed to write \"{}\": {}", path.display(), e);
@@ -352,13 +383,15 @@ fn write_entry_streaming(
 	if let Err(e) = file.flush() {
 		log::warn!("Failed to write \"{}\": {}", path.display(), e);
 		*failed_writes += 1;
+		return Ok(());
 	}
+	verify_crc(path, crc, hasher.finalize(), tally);
 	Ok(())
 }
 
-fn write_entries_parallel(conf: &ExtractGmaConfig, r: &mut impl BufRead, entries: &[GmaEntry]) -> Result<(), FastGmadError> {
+fn write_entries_parallel(conf: &ExtractGmaConfig, r: &mut impl BufRead, entries: &[GmaEntry], tally: &CrcTally) -> Result<(), FastGmadError> {
 	struct State {
-		queue: VecDeque<(PathBuf, Vec<u8>)>,
+		queue: VecDeque<(PathBuf, u32, Vec<u8>)>,
 		mem_used: usize,
 		failed_writes: usize,
 		producer_done: bool,
@@ -395,7 +428,7 @@ fn write_entries_parallel(conf: &ExtractGmaConfig, r: &mut impl BufRead, entries
 		for _ in 0..conf.max_io_threads.get() {
 			s.spawn(|| {
 				loop {
-					let (path, buf) = {
+					let (path, crc, buf) = {
 						let mut s = state.lock().unwrap();
 						loop {
 							if s.producer_done && s.queue.is_empty() {
@@ -409,6 +442,9 @@ fn write_entries_parallel(conf: &ExtractGmaConfig, r: &mut impl BufRead, entries
 					};
 
 					let res = std::fs::write(&path, &buf);
+					if res.is_ok() {
+						verify_crc(&path, crc, crc32fast::hash(&buf), tally);
+					}
 					let mut s = state.lock().unwrap();
 					s.mem_used -= buf.len();
 					if let Err(e) = res {
@@ -429,7 +465,7 @@ fn write_entries_parallel(conf: &ExtractGmaConfig, r: &mut impl BufRead, entries
 
 		for entry in entries {
 			if entry.size > conf.max_io_memory_usage.get() as u64 {
-				write_entry_streaming(r, &entry.path, entry.size, &mut scratch, &mut inline_failed_writes)?;
+				write_entry_streaming(r, &entry.path, entry.crc, entry.size, &mut scratch, &mut inline_failed_writes, tally)?;
 				continue;
 			}
 
@@ -451,7 +487,7 @@ fn write_entries_parallel(conf: &ExtractGmaConfig, r: &mut impl BufRead, entries
 			}
 
 			let mut s = state.lock().unwrap();
-			s.queue.push_back((entry.path.clone(), buf));
+			s.queue.push_back((entry.path.clone(), entry.crc, buf));
 			drop(s);
 			queue_cv.notify_one();
 		}
@@ -464,7 +500,7 @@ fn write_entries_parallel(conf: &ExtractGmaConfig, r: &mut impl BufRead, entries
 	finish_failed_writes(s.failed_writes)
 }
 
-fn extract_entries_parallel(conf: &ExtractGmaConfig, gma_path: &Path, entries: &[GmaEntry]) -> Result<(), FastGmadError> {
+fn extract_entries_parallel(conf: &ExtractGmaConfig, gma_path: &Path, entries: &[GmaEntry], tally: &CrcTally) -> Result<(), FastGmadError> {
 	let next_entry = AtomicUsize::new(0);
 	let failed_writes = AtomicUsize::new(0);
 	let stop = AtomicBool::new(false);
@@ -494,7 +530,7 @@ fn extract_entries_parallel(conf: &ExtractGmaConfig, gma_path: &Path, entries: &
 					let Some(entry) = entries.get(index) else {
 						return;
 					};
-					if let Err(e) = write_entry_at(&file, &entry.path, entry.offset, entry.size, &mut scratch, &failed_writes) {
+					if let Err(e) = write_entry_at(&file, entry, &mut scratch, &failed_writes, tally) {
 						read_error.lock().unwrap().get_or_insert(e);
 						stop.store(true, Ordering::Relaxed);
 						return;
@@ -510,7 +546,8 @@ fn extract_entries_parallel(conf: &ExtractGmaConfig, gma_path: &Path, entries: &
 	finish_failed_writes(failed_writes.load(Ordering::Relaxed))
 }
 
-fn write_entry_at(file: &File, path: &Path, offset: u64, size: u64, scratch: &mut Vec<u8>, failed_writes: &AtomicUsize) -> Result<(), FastGmadError> {
+fn write_entry_at(file: &File, entry: &GmaEntry, scratch: &mut Vec<u8>, failed_writes: &AtomicUsize, tally: &CrcTally) -> Result<(), FastGmadError> {
+	let path = entry.path.as_path();
 	let mut out = match File::create(path) {
 		Ok(f) => f,
 		Err(e) => {
@@ -520,14 +557,16 @@ fn write_entry_at(file: &File, path: &Path, offset: u64, size: u64, scratch: &mu
 		}
 	};
 
-	let mut remaining = size;
-	let mut position = offset;
+	let mut hasher = crc32fast::Hasher::new();
+	let mut remaining = entry.size;
+	let mut position = entry.offset;
 	while remaining > 0 {
 		let chunk = remaining.min(COPY_CHUNK) as usize;
 		if scratch.len() < chunk {
 			scratch.resize(chunk, 0);
 		}
 		read_exact_at(file, &mut scratch[..chunk], position).map_err(|e| entry_truncated(e, path))?;
+		hasher.update(&scratch[..chunk]);
 		if let Err(e) = out.write_all(&scratch[..chunk]) {
 			log::warn!("Failed to write \"{}\": {}", path.display(), e);
 			failed_writes.fetch_add(1, Ordering::Relaxed);
@@ -536,7 +575,42 @@ fn write_entry_at(file: &File, path: &Path, offset: u64, size: u64, scratch: &mu
 		position += chunk as u64;
 		remaining -= chunk as u64;
 	}
+	verify_crc(path, entry.crc, hasher.finalize(), tally);
 	Ok(())
+}
+
+fn verify_crc(path: &Path, expected: u32, actual: u32, tally: &CrcTally) {
+	if expected == 0 {
+		return;
+	}
+	tally.checked.fetch_add(1, Ordering::Relaxed);
+	if actual == expected {
+		return;
+	}
+	tally.mismatched.fetch_add(1, Ordering::Relaxed);
+	tally.first_mismatch.lock().unwrap().get_or_insert_with(|| path.to_path_buf());
+	log::warn!("CRC mismatch for \"{}\": stored {expected:08x}, computed {actual:08x}", path.display());
+}
+
+fn summary(conf: &ExtractGmaConfig, entries: usize, bad_names: u64, tally: &CrcTally) -> Result<ExtractSummary, FastGmadError> {
+	let crc_mismatch = tally.mismatched.load(Ordering::Relaxed);
+	if conf.strict && crc_mismatch > 0 {
+		let first = tally.first_mismatch.lock().unwrap();
+		let name = &first.as_ref().expect("every mismatch records its path").display();
+		let others = if crc_mismatch > 1 {
+			format!(" and {} more", crc_mismatch - 1)
+		} else {
+			String::new()
+		};
+		return Err(gma_err(format!("CRC mismatch for \"{name}\"{others}")));
+	}
+	Ok(ExtractSummary {
+		v: SUMMARY_VERSION,
+		entries,
+		bad_names,
+		crc_checked: tally.checked.load(Ordering::Relaxed),
+		crc_mismatch,
+	})
 }
 
 #[cfg(unix)]

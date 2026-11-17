@@ -7,6 +7,7 @@ pub struct ExtractGmaConfig {
 	pub out: PathBuf,
 	pub max_io_threads: NonZeroUsize,
 	pub max_io_memory_usage: NonZeroUsize,
+	pub strict: bool,
 }
 
 #[cfg(feature = "binary")]
@@ -40,6 +41,7 @@ impl Default for ExtractGmaConfig {
 			out: PathBuf::new(),
 			max_io_threads: get_default_threads(),
 			max_io_memory_usage: DEFAULT_MEMORY,
+			strict: false,
 		}
 	}
 }
@@ -73,6 +75,7 @@ impl ExtractGmaConfig {
 					);
 				}
 				"-stdin" => input = Some(ExtractGmadIn::Stdin),
+				"--strict" => config.strict = true,
 				"-file" => {
 					input = Some(ExtractGmadIn::File(
 						args.next()
