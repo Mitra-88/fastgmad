@@ -16,14 +16,4 @@ fn main() {
 
 	let readme = format!("{}\n```\n{usage}\n```\n{}", &readme[..usage_start], &readme[usage_end..]);
 	std::fs::write("../README.md", readme).expect("failed to write README.md");
-
-	if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
-		let icon_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-			.join("..")
-			.join("assets")
-			.join("fastgmad.ico");
-		let mut res = winresource::WindowsResource::new();
-		res.set_icon(icon_path.to_str().expect("icon path is not valid UTF-8"));
-		res.compile().unwrap();
-	}
 }
